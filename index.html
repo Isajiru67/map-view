@@ -3,141 +3,224 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>施設プロット＋半径円描画</title>
+  <title>施設＋円内地名（CSV代表点）</title>
 
-  <!-- Leaflet -->
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    crossorigin=""
-  />
-  <script
-    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    crossorigin=""
-  ></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+
+  <!-- CSVパース -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 
   <style>
     html, body { height: 100%; margin: 0; }
     #map { height: 100%; width: 100%; }
-
-    .panel {
-      position: absolute;
-      top: 12px;
-      left: 12px;
-      z-index: 1000;
-      background: rgba(255,255,255,.95);
-      border-radius: 10px;
-      padding: 12px;
-      box-shadow: 0 8px 24px rgba(0,0,0,.15);
-      font-family: system-ui, "Noto Sans JP", sans-serif;
-      width: 320px;
+    .panel{
+      position:absolute; top:12px; left:12px; z-index:1000;
+      background:rgba(255,255,255,.95); border:1px solid #ddd; border-radius:10px;
+      padding:12px; width:380px; box-shadow:0 8px 24px rgba(0,0,0,.12);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif;
     }
-    .panel h1 { font-size: 14px; margin: 0 0 8px; }
-    .row { display: flex; gap: 6px; margin-bottom: 6px; }
-    input {
-      flex: 1;
-      padding: 6px 8px;
-      font-size: 13px;
-      border-radius: 6px;
-      border: 1px solid #ccc;
-    }
-    button {
-      padding: 6px 10px;
-      font-size: 13px;
-      border-radius: 6px;
-      border: 1px solid #ccc;
-      background: #fff;
-      cursor: pointer;
-    }
-    .meta {
-      font-size: 12px;
-      color: #444;
-      line-height: 1.4;
-      margin-top: 6px;
-    }
-    .badge {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: #f0f0f0;
-      font-size: 12px;
-      margin-right: 4px;
-    }
+    .row{ display:flex; gap:6px; align-items:center; }
+    input{ flex:1; padding:6px 8px; border:1px solid #ccc; border-radius:8px; font-size:13px; }
+    button{ padding:6px 10px; border:1px solid #ccc; background:#fff; border-radius:8px; font-size:13px; cursor:pointer; }
+    .meta{ font-size:12px; color:#555; line-height:1.35; margin-top:8px; }
+    .badge{ display:inline-block; padding:2px 8px; border:1px solid #ddd; border-radius:999px; background:#fafafa; margin-right:6px; }
+    .list{ max-height:240px; overflow:auto; margin-top:8px; padding-top:8px; border-top:1px solid #eee; }
+    .item{ font-size:12px; margin:0 0 4px 0; }
   </style>
 </head>
 
 <body>
-<div id="map"></div>
+  <div id="map"></div>
 
-<div class="panel">
-  <h1>半径指定 円描画</h1>
-  <div class="row">
-    <input id="radius" type="number" value="500" min="10" step="10" />
-    <span style="font-size:12px;line-height:28px;">m</span>
+  <div class="panel">
+    <div style="font-size:14px;font-weight:600;">円内の地名（市区町村＋大字町丁目）</div>
+
+    <div class="row" style="margin-top:8px;">
+      <input id="radius" type="number" value="500" min="10" step="10" />
+      <div style="font-size:12px;color:#444;">m</div>
+      <button id="clear">クリア</button>
+    </div>
+
+    <div class="meta">
+      <span class="badge" id="facilityCount">施設: 読込中…</span>
+      <span class="badge" id="chomeCount">字丁目: 読込中…</span><br/>
+      操作：地図をクリック → 円を描画 → 円内（代表点が入った）字丁目を列挙
+      <div id="err" style="margin-top:6px;color:#b00020;"></div>
+    </div>
+
+    <div class="list" id="out"></div>
   </div>
-  <div class="row">
-    <button id="clear">円をクリア</button>
-  </div>
-  <div class="meta">
-    <div><span class="badge">操作</span> 地図をクリックすると中心点を指定</div>
-    <div id="info"></div>
-  </div>
-</div>
 
 <script>
-  const GEOJSON_FILE = "./P29-23_40.geojson";
+  const FACILITY_GEOJSON = "./P29-23_40.geojson";
+  const CHOME_CSV = "./40_2024.csv"; // Shift_JIS想定だがUTF-8も試す
 
-  const map = L.map("map").setView([35.68, 139.76], 5);
-
+  const map = L.map("map", { preferCanvas: true }).setView([33.6, 130.4], 10);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: "&copy; OpenStreetMap"
+    maxZoom: 19, attribution: "&copy; OpenStreetMap"
   }).addTo(map);
 
   const facilityLayer = L.layerGroup().addTo(map);
 
-  let allFeatures = [];
+  let facilities = [];
+  let chomes = []; // {lat, lon, city, name}
   let centerMarker = null;
   let radiusCircle = null;
 
-  // 距離計算（m）
-  function distance(lat1, lon1, lat2, lon2) {
-    return map.distance([lat1, lon1], [lat2, lon2]);
+  function showErr(msg){
+    const el = document.getElementById("err");
+    el.textContent = msg || "";
   }
 
-  function drawCircle(lat, lon) {
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;").replaceAll("'","&#039;");
+  }
+
+  async function loadGeoJSON(url){
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error(`${url} fetch failed: ${r.status} ${r.statusText}`);
+    return await r.json();
+  }
+
+  // Shift_JIS/UTF-8 自動判定でCSVを読む（文字化け・環境差対策）
+  async function loadCsvSmart(url){
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`${url} fetch failed: ${res.status} ${res.statusText}`);
+
+    const buf = await res.arrayBuffer();
+
+    let text = "";
+    let ok = false;
+
+    // まず shift_jis、ダメなら utf-8
+    for (const enc of ["shift_jis", "utf-8"]) {
+      try {
+        text = new TextDecoder(enc).decode(buf);
+        // ヘッダ判定（最低限）
+        if (text.includes("市区町村名") && text.includes("緯度") && text.includes("経度")) {
+          ok = true;
+          break;
+        }
+      } catch (e) {
+        // continue
+      }
+    }
+    if (!ok) {
+      // それでもパースは試す（ヘッダ名称が違う可能性もあるので）
+      text = new TextDecoder("utf-8").decode(buf);
+    }
+
+    const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+    if (parsed.errors?.length) console.warn("CSV parse errors:", parsed.errors);
+    return parsed.data;
+  }
+
+  function renderFacilities(){
+    facilityLayer.clearLayers();
+    for (const f of facilities){
+      if (f.geometry?.type !== "Point") continue;
+      const [lon, lat] = f.geometry.coordinates;
+      L.circleMarker([lat, lon], { radius:4, weight:1, fillOpacity:0.7 })
+        .bindTooltip((f.properties?.P29_004) || "施設", { sticky:true })
+        .addTo(facilityLayer);
+    }
+  }
+
+  function listChomeNamesInCircle(lat, lon, radiusMeters){
+    const out = document.getElementById("out");
+    out.innerHTML = `<div class="item">判定中…</div>`;
+
+    const seen = new Set();
+    const results = [];
+
+    for (const c of chomes){
+      const d = map.distance([lat, lon], [c.lat, c.lon]);
+      if (d <= radiusMeters){
+        const label = `${c.city} ${c.name}`.trim();
+        if (!seen.has(label)){
+          seen.add(label);
+          results.push(label);
+        }
+      }
+    }
+
+    results.sort((a,b)=>a.localeCompare(b, "ja"));
+
+    if (results.length === 0){
+      out.innerHTML = `<div class="item">該当なし（代表点が円内に入った字丁目がありません）</div>`;
+      return;
+    }
+
+    out.innerHTML =
+      `<div class="item"><b>円内（代表点ベース）: ${results.length}件</b></div>` +
+      results.map(s => `<div class="item">・${escapeHtml(s)}</div>`).join("");
+  }
+
+  function drawCircle(lat, lon){
     const r = Number(document.getElementById("radius").value);
 
     if (centerMarker) map.removeLayer(centerMarker);
     if (radiusCircle) map.removeLayer(radiusCircle);
 
     centerMarker = L.marker([lat, lon]).addTo(map);
-    radiusCircle = L.circle([lat, lon], {
-      radius: r,
-      color: "#007aff",
-      weight: 2,
-      fillOpacity: 0.15
-    }).addTo(map);
+    radiusCircle = L.circle([lat, lon], { radius: r, weight: 2, fillOpacity: 0.12 }).addTo(map);
 
-    // 円内施設数カウント
-    let count = 0;
-    for (const f of allFeatures) {
-      const [flon, flat] = f.geometry.coordinates;
-      if (distance(lat, lon, flat, flon) <= r) {
-        count++;
-      }
-    }
-
-    document.getElementById("info").innerHTML =
-      `中心: ${lat.toFixed(5)}, ${lon.toFixed(5)}<br>` +
-      `半径: ${r} m<br>` +
-      `円内施設数: <b>${count}</b>`;
+    listChomeNamesInCircle(lat, lon, r);
   }
 
-  map.on("click", e => {
-    drawCircle(e.latlng.lat, e.latlng.lng);
-  });
+  map.on("click", e => drawCircle(e.latlng.lat, e.latlng.lng));
 
   document.getElementById("clear").onclick = () => {
     if (centerMarker) map.removeLayer(centerMarker);
-    if (radiusCircle) map
+    if (radiusCircle) map.removeLayer(radiusCircle);
+    centerMarker = radiusCircle = null;
+    document.getElementById("out").innerHTML = "";
+  };
+
+  // ===== 初期化（ここが無いと「読込中…」のまま） =====
+  (async function init(){
+    try{
+      showErr("");
+
+      // 施設
+      const fgj = await loadGeoJSON(FACILITY_GEOJSON);
+      facilities = fgj.features || [];
+      document.getElementById("facilityCount").textContent = `施設: ${facilities.length}件`;
+      renderFacilities();
+
+      // 字丁目CSV
+      const rows = await loadCsvSmart(CHOME_CSV);
+
+      // 必要列（このCSVはこの列名で入っている想定）
+      // 市区町村名 / 大字町丁目名 / 緯度 / 経度
+      chomes = rows.map(r => ({
+        city: r["市区町村名"],
+        name: r["大字町丁目名"],
+        lat: Number(r["緯度"]),
+        lon: Number(r["経度"])
+      })).filter(x =>
+        x.city && x.name &&
+        Number.isFinite(x.lat) && Number.isFinite(x.lon)
+      );
+
+      document.getElementById("chomeCount").textContent = `字丁目: ${chomes.length}件`;
+
+      // 施設の範囲に寄せる
+      const pts = facilities
+        .filter(f => f.geometry?.type==="Point")
+        .map(f => [f.geometry.coordinates[1], f.geometry.coordinates[0]]);
+      if (pts.length){
+        map.fitBounds(L.latLngBounds(pts).pad(0.1));
+      }
+
+    }catch(err){
+      console.error(err);
+      showErr("読み込み失敗: " + (err?.message || err));
+    }
+  })();
+</script>
+</body>
+</html>
